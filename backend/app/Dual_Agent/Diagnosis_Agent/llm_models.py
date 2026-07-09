@@ -6,6 +6,7 @@ Loaded once at import time; all other Diagnosis Agent modules import from here.
 """
 
 import os
+from pathlib import Path
 from langchain_groq import ChatGroq
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
@@ -23,10 +24,9 @@ llm = ChatGroq(
 )
 
 # ── ChromaDB (Diagnosis knowledge base) ──────────────────────────────────────
-_CHROMA_PATH = os.getenv(
-    "CHROMA_DIAGNOSIS_DB_PATH",
-    r"C:\Users\harsh\Desktop\Python\Projects\acdss_fullstack\backend\app\Diagnosis_db\chroma_db",
-)
+# Resolve relative to this file so it works on both Windows (local) and Linux (Render)
+_DEFAULT_CHROMA_PATH = str(Path(__file__).resolve().parent.parent / "Diagnosis_db" / "chroma_db")
+_CHROMA_PATH = os.getenv("CHROMA_DIAGNOSIS_DB_PATH", _DEFAULT_CHROMA_PATH)
 
 print(f"[DiagnosisAgent] Connecting to Diagnosis knowledge base at: {_CHROMA_PATH}")
 

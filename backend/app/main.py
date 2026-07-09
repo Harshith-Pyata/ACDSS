@@ -22,7 +22,6 @@ from .seed import seed_database
 
 load_dotenv()
 
-# ── Allowed CORS origins ──────────────────────────────────────────────────────
 _env_origin = os.getenv("FRONTEND_ORIGIN", "")
 ALLOWED_ORIGINS = [o.strip() for o in _env_origin.split(",") if o.strip()] or [
     "http://localhost:5173",
@@ -32,7 +31,6 @@ ALLOWED_ORIGINS = [o.strip() for o in _env_origin.split(",") if o.strip()] or [
     "http://127.0.0.1:5174",
 ]
 
-# ── Lazy-load the heavy pipeline ──────────────────────────────────────────────
 _pipeline_loaded = False
 _ocr_fn          = None
 _run_diagnosis   = None
@@ -51,7 +49,6 @@ def _load_pipeline():
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# ── App lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app_instance):
     seed_database()
@@ -68,7 +65,6 @@ app.add_middleware(
 )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def doctor_to_out(d: Doctor) -> DoctorOut:
     return DoctorOut(
@@ -82,12 +78,15 @@ def _normalise_labs(raw_analysis: list) -> list[LabMarker]:
     out = []
     for item in raw_analysis:
         if isinstance(item, dict):
+            causes = item.get("potential_causes", [])
+            if isinstance(causes, str):
+                causes = [causes]
             out.append(LabMarker(
-                test_name=item.get("test_name", ""),
-                patient_value=item.get("patient_value", ""),
-                reference_range=item.get("reference_range", ""),
-                status=item.get("status", "Unknown"),
-                potential_causes=item.get("potential_causes", []),
+                test_name=_as_text(item.get("test_name", "")),
+                patient_value=_as_text(item.get("patient_value", "")),
+                reference_range=_as_text(item.get("reference_range", "")),
+                status=_as_text(item.get("status", "Unknown"), "Unknown"),
+                potential_causes=[_as_text(c) for c in causes] if isinstance(causes, (list, tuple)) else [],
             ))
     return out
 
@@ -96,9 +95,9 @@ def _normalise_plan(raw_plan: list) -> list[TreatmentStep]:
     for step in raw_plan:
         if isinstance(step, dict):
             out.append(TreatmentStep(
-                medication_or_action=step.get("medication_or_action", ""),
-                dosage_or_detail=step.get("dosage_or_detail", ""),
-                rationale=step.get("rationale", ""),
+                medication_or_action=_as_text(step.get("medication_or_action", "")),
+                dosage_or_detail=_as_text(step.get("dosage_or_detail", "")),
+                rationale=_as_text(step.get("rationale", "")),
             ))
     return out
 
@@ -116,14 +115,33 @@ def _build_meta_eval(raw: dict | None) -> MetaEvaluation | None:
     )
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+def _as_text(value, default: str = "") -> str:
+    """Coerce an LLM-produced field into a readable string.
+
+    The agents sometimes return a dict or list where the response schema expects
+    a plain string (e.g. follow_up = {'tests': [...], 'timing': '...'}). Convert
+    those to human-readable text instead of crashing response validation.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        parts = []
+        for k, v in value.items():
+            if isinstance(v, (list, tuple)):
+                v = ", ".join(str(x) for x in v)
+            parts.append(f"{str(k).replace('_', ' ').capitalize()}: {v}")
+        return ". ".join(parts)
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_as_text(x) for x in value)
+    return str(value)
+
 
 @app.get("/")
 def root():
     return {"message": "ACDSS backend running"}
 
-
-# ── Conversational chat (symptom triage) ─────────────────────────────────────
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, db: Session = Depends(get_db)):
     """
@@ -135,8 +153,6 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     result  = run_acdss_agent(req)
     spec    = result.specialization
 
-    # Doctors are shown ONLY when the agent's suggest_doctors tool ran — i.e. the
-    # patient explicitly agreed to see suggestions. The agent asks first.
     doctors = []
     ask_booking = False
     if result.show_doctors:
@@ -170,7 +186,6 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     )
 
 
-# ── NEW: Diagnosis-only endpoint ──────────────────────────────────────────────
 @app.post("/diagnose", response_model=DiagnoseResponse)
 def diagnose(
     file:         UploadFile = File(...),
@@ -223,21 +238,23 @@ def diagnose(
         .all()
     )
 
+    key_abn = result.get("key_abnormalities", [])
+    if isinstance(key_abn, str):
+        key_abn = [key_abn]
     return DiagnoseResponse(
         raw_text=raw_text,
         extracted_lab_values=result.get("extracted_lab_values", {}),
-        primary_hypothesis=result.get("primary_hypothesis", ""),
-        simple_explanation=result.get("simple_explanation", ""),
+        primary_hypothesis=_as_text(result.get("primary_hypothesis", "")),
+        simple_explanation=_as_text(result.get("simple_explanation", "")),
         detailed_analysis=_normalise_labs(result.get("detailed_analysis", [])),
         recommended_specialization=spec,
         confidence_score=result.get("confidence_score", 75),
-        key_abnormalities=result.get("key_abnormalities", []),
-        evaluation_notes=result.get("evaluation_notes", ""),
+        key_abnormalities=[_as_text(k) for k in key_abn] if isinstance(key_abn, (list, tuple)) else [],
+        evaluation_notes=_as_text(result.get("evaluation_notes", "")),
         doctors=[doctor_to_out(d) for d in doctors],
     )
 
 
-# ── NEW: Treatment-only endpoint ──────────────────────────────────────────────
 @app.post("/treatment", response_model=TreatmentResponse)
 def treatment(req: TreatmentRequest):
     """
@@ -263,18 +280,17 @@ def treatment(req: TreatmentRequest):
         raise HTTPException(status_code=500, detail=f"Treatment error: {exc}")
 
     return TreatmentResponse(
-        disease_explanation=result.get("disease_explanation", ""),
+        disease_explanation=_as_text(result.get("disease_explanation", "")),
         treatment_plan=_normalise_plan(result.get("treatment_plan", [])),
-        prognosis=result.get("prognosis", ""),
-        follow_up=result.get("follow_up", ""),
-        severity_level=result.get("severity_level", "moderate"),
-        follow_up_question=result.get("follow_up_question",
+        prognosis=_as_text(result.get("prognosis", "")),
+        follow_up=_as_text(result.get("follow_up", "")),
+        severity_level=_as_text(result.get("severity_level", "moderate"), "moderate"),
+        follow_up_question=_as_text(result.get("follow_up_question", ""),
             "Are you currently experiencing any new or worsening symptoms?"),
         meta_evaluation=_build_meta_eval(result.get("meta_evaluation")),
     )
 
 
-# ── Legacy: full pipeline (kept for backward compat) ─────────────────────────
 @app.post("/upload-report", response_model=ReportUploadResponse)
 def upload_report(
     file:         UploadFile = File(...),
@@ -321,19 +337,18 @@ def upload_report(
     return ReportUploadResponse(
         raw_text=raw_text,
         extracted_lab_values=result.get("extracted_lab_values", {}),
-        primary_hypothesis=result.get("primary_hypothesis", ""),
+        primary_hypothesis=_as_text(result.get("primary_hypothesis", "")),
         detailed_analysis=_normalise_labs(result.get("detailed_analysis", [])),
-        disease_explanation=result.get("disease_explanation", ""),
+        disease_explanation=_as_text(result.get("disease_explanation", "")),
         treatment_plan=_normalise_plan(result.get("treatment_plan", [])),
-        prognosis=result.get("prognosis", ""),
-        follow_up=result.get("follow_up", ""),
+        prognosis=_as_text(result.get("prognosis", "")),
+        follow_up=_as_text(result.get("follow_up", "")),
         recommended_specialization=spec,
         doctors=[doctor_to_out(d) for d in doctors],
         meta_evaluation=_build_meta_eval(result.get("meta_evaluation")),
     )
 
 
-# ── Doctor list ───────────────────────────────────────────────────────────────
 @app.get("/doctors", response_model=list[DoctorOut])
 def list_doctors(
     specialization: str | None = None,
@@ -348,7 +363,6 @@ def list_doctors(
     return [doctor_to_out(d) for d in q.order_by(Doctor.rating.desc()).all()]
 
 
-# ── Appointment booking ───────────────────────────────────────────────────────
 @app.post("/appointments", response_model=AppointmentOut)
 def create_appointment(req: AppointmentCreate, db: Session = Depends(get_db)):
     doctor = db.query(Doctor).filter(Doctor.id == req.doctor_id).first()

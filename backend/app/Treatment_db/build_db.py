@@ -1,5 +1,6 @@
 import os
 import time 
+from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -9,10 +10,10 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from dotenv import load_dotenv
 load_dotenv()
 
-
+_THIS_DIR = Path(__file__).resolve().parent
 CHROMA_TREATMENT_DB_PATH = os.getenv(
     "CHROMA_TREATMENT_DB_PATH",
-    r"C:\Users\harsh\Desktop\Python\Projects\acdss_fullstack\backend\app\Treatment_db\chroma_db",
+    str(_THIS_DIR / "chroma_db"),
 )
 
 def create_vector_database_from_pdf(pdf_path: str):
@@ -64,7 +65,7 @@ def create_vector_database_from_pdf(pdf_path: str):
 
 if __name__ == "__main__":
 
-    PATH_TO_YOUR_PDF = "C:\\Users\\harsh\\Desktop\\Python\\Projects\\acdss_fullstack\\backend\\app\\Treatment_db\\treatment_guidelines.pdf" 
+    PATH_TO_YOUR_PDF = str(_THIS_DIR / "treatment_guidelines.pdf") 
     
     if os.path.exists(PATH_TO_YOUR_PDF):
         create_vector_database_from_pdf(PATH_TO_YOUR_PDF)

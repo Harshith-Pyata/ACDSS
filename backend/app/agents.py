@@ -82,7 +82,11 @@ SYSTEM_PROMPT = (
     "1. You are first a conversational assistant. Answer questions directly and "
     "kindly. For greetings, thanks, or general questions, just reply naturally "
     "without calling any tool.\n"
-    "2. Only call a tool when its specific trigger below is met.\n\n"
+    "2. Only call a tool when its specific trigger below is met.\n"
+    "3. If the patient asks you to summarise, recap, or explain the EXISTING "
+    "diagnosis or treatment, answer in words using get_patient_labs. Do NOT call "
+    "analyze_lab_report or build_treatment_plan again, and never invent new lab "
+    "values or a different diagnosis.\n\n"
     "DOCTOR-SUGGESTION FLOW (follow this exactly):\n"
     "1. When you've identified a health concern, call recommend_specialist to note "
     "the specialization, then ASK the patient: 'Would you like me to suggest some "
@@ -152,6 +156,8 @@ def run_acdss_agent(req: ChatRequest) -> AgentResult:
         """Best available diagnosis: freshly computed this turn, else round-tripped."""
         if agent_state["diagnosis"]:
             return agent_state["diagnosis"]
+        if req.diagnosis:
+            return req.diagnosis
         if req.primary_hypothesis or req.extracted_lab_values:
             return {
                 "primary_hypothesis":   req.primary_hypothesis or "",
@@ -160,6 +166,10 @@ def run_acdss_agent(req: ChatRequest) -> AgentResult:
             }
         return {}
 
+    def _current_treatment() -> dict:
+        """Best available treatment: freshly computed this turn, else round-tripped."""
+        return agent_state["treatment"] or req.treatment or {}
+
     # ── Tool 1: run the Diagnosis Agent (RAG) on extracted lab-report text ────
     @tool
     def analyze_lab_report(ocr_text: str = "") -> str:
@@ -167,9 +177,14 @@ def run_acdss_agent(req: ChatRequest) -> AgentResult:
         Call this whenever lab-report text is available. `ocr_text` is the extracted
         text. Returns a short diagnosis summary; the full structured result is stored
         for the rest of the conversation."""
-        text = (ocr_text or req.ocr_text or "").strip()
+        # SECURITY: only ever analyze the REAL uploaded OCR text. Never trust an
+        # ocr_text the model supplies — that lets it invent a fake lab report and
+        # re-diagnose on summary/chat turns.
+        text = (req.ocr_text or "").strip()
         if not text:
-            return "No lab-report text is available to analyze. Ask the patient to upload a report."
+            return ("No NEW lab report was uploaded this turn. Do NOT analyze or "
+                    "invent any lab values. If the patient wants a recap, call "
+                    "get_patient_labs and summarise the EXISTING diagnosis in words.")
         # Deferred import so plain chats never load the heavy LangGraph/Chroma stack.
         from app.Dual_Agent.Diagnosis_Agent.agent import run_diagnosis_agent
         diag = run_diagnosis_agent(text, doctor_notes=req.message or "")
@@ -220,15 +235,44 @@ def run_acdss_agent(req: ChatRequest) -> AgentResult:
     # ── Tool 3: read back already-computed labs/diagnosis ────────────────────
     @tool
     def get_patient_labs(query: str = "") -> str:
-        """Read back the patient's already-computed diagnosis and lab values when
-        they ask about their report, kidney, heart, sugar, or any uploaded result."""
+        """Read back the patient's EXISTING diagnosis, lab values, and treatment plan.
+        Use this to summarise or answer questions about their report. The summary you
+        give the patient must be based ONLY on the facts returned here — never invent
+        a different diagnosis."""
         diag = _current_diagnosis()
-        if diag.get("primary_hypothesis") or diag.get("extracted_lab_values"):
-            return (
-                f"Patient Diagnosis: {diag.get('primary_hypothesis', '')}\n"
-                f"Extracted Lab Values: {json.dumps(diag.get('extracted_lab_values', {}))}"
-            )
-        return "No lab report has been analyzed for this patient yet."
+        tx = _current_treatment()
+        if not (diag.get("primary_hypothesis") or diag.get("extracted_lab_values") or tx):
+            return "No lab report has been analyzed for this patient yet."
+
+        lines = ["=== CONFIRMED DIAGNOSIS (ground truth) ==="]
+        lines.append(f"Condition: {diag.get('primary_hypothesis', 'N/A')}")
+        if diag.get("simple_explanation"):
+            lines.append(f"Explanation: {diag['simple_explanation']}")
+        if diag.get("key_abnormalities"):
+            lines.append(f"Key findings: {', '.join(diag['key_abnormalities'])}")
+        if diag.get("extracted_lab_values"):
+            lines.append(f"Lab values: {json.dumps(diag['extracted_lab_values'])}")
+        if diag.get("recommended_specialization"):
+            lines.append(f"Suggested specialist: {diag['recommended_specialization']}")
+
+        if tx:
+            lines.append("\n=== TREATMENT PLAN (ground truth) ===")
+            if tx.get("disease_explanation"):
+                lines.append(f"Overview: {tx['disease_explanation']}")
+            steps = tx.get("treatment_plan", [])
+            for s in steps:
+                if isinstance(s, dict):
+                    lines.append(
+                        f"- {s.get('medication_or_action', '')}: {s.get('dosage_or_detail', '')}"
+                    )
+            if tx.get("prognosis"):
+                lines.append(f"Outlook: {tx['prognosis']}")
+            if tx.get("severity_level"):
+                lines.append(f"Severity: {tx['severity_level']}")
+
+        lines.append("\nSummarise ONLY the facts above. Do not introduce any new or "
+                     "different diagnosis.")
+        return "\n".join(lines)
 
     # ── Tool 4: note the suitable specialist (does NOT show doctors) ─────────
     @tool
@@ -457,6 +501,27 @@ def run_acdss_agent(req: ChatRequest) -> AgentResult:
 
     # Manual tool-calling loop (works without langchain.agents).
     messages = [SystemMessage(content=SYSTEM_PROMPT)]
+
+    # Ground the model in the real session diagnosis/treatment so any summary is
+    # accurate and it can never hallucinate a different condition.
+    _diag_ctx = _current_diagnosis()
+    _tx_ctx = _current_treatment()
+    if _diag_ctx.get("primary_hypothesis") or _tx_ctx:
+        ctx = ["PATIENT SESSION CONTEXT — this is the ground truth for THIS patient. "
+               "When you summarise or answer, use ONLY these facts and never invent a "
+               "different diagnosis or treatment:"]
+        if _diag_ctx.get("primary_hypothesis"):
+            ctx.append(f"- Diagnosis: {_diag_ctx.get('primary_hypothesis')}")
+        if _diag_ctx.get("key_abnormalities"):
+            ctx.append(f"- Key findings: {', '.join(_diag_ctx['key_abnormalities'])}")
+        if _diag_ctx.get("extracted_lab_values"):
+            ctx.append(f"- Lab values: {json.dumps(_diag_ctx['extracted_lab_values'])}")
+        if _tx_ctx.get("disease_explanation"):
+            ctx.append(f"- Treatment overview: {_tx_ctx['disease_explanation']}")
+        if _tx_ctx.get("prognosis"):
+            ctx.append(f"- Outlook: {_tx_ctx['prognosis']}")
+        messages.append(SystemMessage(content="\n".join(ctx)))
+
     messages += _to_lc_messages(req.chat_history)
     messages.append(HumanMessage(content=user_input))
 

@@ -1,9 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
-
-# ── Chat (existing) ──────────────────────────────────────────────────────────
-
 class ChatMessageInput(BaseModel):
     role: str
     content: str
@@ -11,11 +8,12 @@ class ChatMessageInput(BaseModel):
 class ChatRequest(BaseModel):
     message:              str
     chat_history:         List[ChatMessageInput] = []
-    # ── Dual-agent state round-tripped from the frontend ──────────────────────
-    ocr_text:             Optional[str] = None                   # extracted lab-report text from an uploaded image
+    ocr_text:             Optional[str] = None
     primary_hypothesis:   Optional[str] = None
     extracted_lab_values: Optional[Dict[str, str]] = None
-    detailed_analysis:    Optional[List[Dict[str, Any]]] = None  # carried back so the treatment tool can reuse it
+    detailed_analysis:    Optional[List[Dict[str, Any]]] = None
+    diagnosis:            Optional[Dict[str, Any]] = None 
+    treatment:            Optional[Dict[str, Any]] = None 
     patient_name:         Optional[str] = "Guest"
     age:                  Optional[int] = None
     gender:               Optional[str] = None
@@ -37,13 +35,10 @@ class ChatResponse(BaseModel):
     recommended_specialization: str
     doctors:                    List[DoctorOut]
     ask_booking:                bool = True
-    # ── Structured dual-agent output, present only when the agent ran a tool ──
-    diagnosis:                  Optional[Dict[str, Any]] = None  # set when analyze_lab_report ran
-    treatment:                  Optional[Dict[str, Any]] = None  # set when build_treatment_plan ran
-    booking:                    Optional[Dict[str, Any]] = None  # set when book_appointment ran
+    diagnosis:                  Optional[Dict[str, Any]] = None
+    treatment:                  Optional[Dict[str, Any]] = None  
+    booking:                    Optional[Dict[str, Any]] = None  
 
-
-# ── Appointments ─────────────────────────────────────────────────────────────
 
 class AppointmentCreate(BaseModel):
     patient_name: str

@@ -9,15 +9,17 @@ Run:
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
 
 load_dotenv()
 
+_THIS_DIR = Path(__file__).resolve().parent
 CHROMA_DB_PATH = os.getenv(
-    "CHROMA_DB_PATH",
-    r"C:\Users\harsh\Desktop\Python\Projects\ACDSS\chroma_db",
+    "CHROMA_TREATMENT_DB_PATH",
+    str(_THIS_DIR / "chroma_db"),
 )
 
 TEST_QUERIES = [
